@@ -16,67 +16,107 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) App-Pfad automatisch finden (dort, wo package.json liegt)
+      # 1) App-Pfad automatisch finden (wo die package.json liegt)
       - name: Detect app path
         id: app
+        shell: bash
         run: |
-          set -e
-          # Kandidatenliste – erweitere bei Bedarf
-          CANDIDATES=(
-            "."
-            "src"
-            "app"
-            "web"
-            "client"
-            "frontend"
-            "site"
-          )
+          set -euo pipefail
+          CANDIDATES=( "." "src" "app" "web" "client" "frontend" "site" )
           for d in "${CANDIDATES[@]}"; do
             if [ -f "$d/package.json" ]; then
               echo "path=$d" >> "$GITHUB_OUTPUT"
-              echo "lock=$d/package-lock.json" >> "$GITHUB_OUTPUT"
+              if [ -f "$d/package-lock.json" ]; then
+                echo "lock=$d/package-lock.json" >> "$GITHUB_OUTPUT"
+                echo "lock_exists=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "lock_exists=false" >> "$GITHUB_OUTPUT"
+              fi
               exit 0
             fi
           done
           echo "Keine package.json gefunden. Bitte App-Verzeichnis prüfen." >&2
           exit 1
 
-      # 2) Node 20 bereitstellen + npm-Cache auf Basis des Lockfiles (falls vorhanden)
-      - name: Use Node.js 20.x
+      # 2a) Node 20 MIT npm-Cache (nur wenn Lockfile existiert)
+      - name: Use Node.js 20.x (cached)
+        if: steps.app.outputs.lock_exists == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          # cache-dependency-path darf NICHT ins Leere zeigen – daher 2 Pfade:
-          # (a) erkanntes package-lock.json
-          # (b) Fallbacks, falls kein Lockfile committed ist
-          cache-dependency-path: |
-            ${{ steps.app.outputs.lock }}
-            package-lock.json
-            npm-shrinkwrap.json
+          cache-dependency-path: ${{ steps.app.outputs.lock }}
 
-      # 3) Install & Build im gefundenen App-Pfad
+      # 2b) Node 20 OHNE Cache (fallback)
+      - name: Use Node.js 20.x
+        if: steps.app.outputs.lock_exists != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 3) Install & Build im erkannten App-Pfad
       - name: Install & Build
         working-directory: ${{ steps.app.outputs.path }}
         run: |
+          set -euo pipefail
           if [ -f package-lock.json ]; then
             npm ci
           else
-            # Falls kein Lockfile committed ist
             npm install
           fi
           npm run build
 
-      # 4) Deploy zur Azure Static Web App (nur Upload – kein zweiter Build)
+      # 4) Artefakt-Verzeichnis (mit index.html) erkennen
+      - name: Detect build artifact
+        id: artifact
+        working-directory: ${{ steps.app.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATES=( "dist" "dist/*/browser" "build" "out" "wwwroot" "." )
+          ARTIFACT=""
+          for d in "${CANDIDATES[@]}"; do
+            for p in $d; do
+              if [ -f "$p/index.html" ]; then
+                ARTIFACT="$p"
+                break 2
+              fi
+            done
+          done
+          if [ -z "$ARTIFACT" ]; then
+            echo "Konnte keinen Build-Ordner mit index.html finden. Prüfe deinen Build-Output." >&2
+            echo "Gefundene Struktur:" >&2
+            ls -la
+            exit 1
+          fi
+          # Pfad relativ zum Repo-Root ausgeben
+          if [ "$ARTIFACT" = "." ]; then
+            echo "artifact=${{ steps.app.outputs.path }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "artifact=${{ steps.app.outputs.path }}/$ARTIFACT" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 5) staticwebapp.config.json sicherstellen (muss im Artefakt liegen, wenn Build übersprungen wird)
+      - name: Ensure staticwebapp.config.json is in artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.app.outputs.path }}/staticwebapp.config.json"
+          DST="${{ steps.artifact.outputs.artifact }}/staticwebapp.config.json"
+          if [ -f "$SRC" ] && [ ! -f "$DST" ]; then
+            cp "$SRC" "$DST"
+          fi
+
+      # 6) Deploy: nur das Artefakt hochladen (kein Oryx-Build)
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_PROUD_RIVER_01FF01803 }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: "upload"
-          app_location: ${{ steps.app.outputs.path }}
-          output_location: "${{ steps.app.outputs.path }}/build"
+          app_location: ${{ steps.artifact.outputs.artifact }}
           skip_app_build: true
+          skip_api_build: true
         env:
           NODE_VERSION: '20'
           WEBSITE_NODE_DEFAULT_VERSION: '20'
