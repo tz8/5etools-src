@@ -18,12 +18,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node 20 + Caching (funktioniert, wenn mindestens EIN Lockfile existiert)
       - name: Use Node.js 20.x
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: 'src/package-lock.json'
+          # Tipp: Stelle sicher, dass mind. einer dieser Pfade existiert (Lockfile committen!)
+          cache-dependency-path: |
+            src/package-lock.json
+            package-lock.json
+            src/npm-shrinkwrap.json
+            npm-shrinkwrap.json
 
       - name: Install & Build
         working-directory: src
